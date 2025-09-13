@@ -126,13 +126,10 @@ async def ping_bots_task(context: ContextTypes.DEFAULT_TYPE):
                     ping_results.append(f"✅ `{bot_username}`: OK")
                 
                 except UserIsBot:
-                    # SUCCESS: This means the conversation is already started.
                     ping_results.append(f"✅ `{bot_username}`: Already started (OK)")
                 except PeerIdInvalid:
-                    # FAILURE: The username is wrong.
                     ping_results.append(f"❌ `{bot_username}`: Invalid username")
                 except Exception as e:
-                    # FAILURE: Any other unexpected error.
                     logger.error(f"Error pinging {bot_username}: {e}")
                     ping_results.append(f"❌ `{bot_username}`: Error ({type(e).__name__})")
             
@@ -181,16 +178,16 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
     message_text = "👇 **Main Menu** 👇\nJust add a bot and start the pinger. I'll handle the rest."
     
+    reply_target = update.message or update.callback_query.message
     if update.callback_query:
         await update.callback_query.edit_message_text(message_text, reply_markup=reply_markup, parse_mode="Markdown")
     else:
-        await update.message.reply_text(message_text, reply_markup=reply_markup, parse_mode="Markdown")
+        await reply_target.reply_text(message_text, reply_markup=reply_markup, parse_mode="Markdown")
 
 async def save_bot_username(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Parses a message for multiple bot usernames and saves them."""
     chat_id = update.effective_chat.id
     raw_text = update.message.text
-    # Regex to find all valid Telegram usernames in the message
     potential_bots = re.findall(r"@[a-zA-Z0-9_]{5,32}", raw_text)
 
     if not potential_bots:
@@ -258,9 +255,13 @@ async def toggle_pinger(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     
 async def post_init(application: Application):
     """Restores running pinger jobs on bot restart."""
+    if not application.job_queue:
+        logger.warning("post_init: JobQueue is not available, skipping job restoration.")
+        return
     if not client:
         logger.warning("post_init: No DB connection, skipping job restoration.")
         return
+        
     logger.info("Checking for jobs to restore from database...")
     async for doc in settings_collection.find({"is_running": True}):
         chat_id = doc["_id"]
@@ -353,7 +354,7 @@ async def manage_bots_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     reply_markup = InlineKeyboardMarkup(keyboard)
     text = "🤖 **Manage Other Bots**\n\nI keep myself awake automatically. Add your *other* bots here."
     
-    reply_target = update.callback_query.message if update.callback_query else update.message
+    reply_target = update.message or update.callback_query.message
     if update.callback_query:
         await reply_target.edit_text(text, reply_markup=reply_markup, parse_mode="Markdown")
     else:
@@ -380,7 +381,6 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 def main() -> None:
     """Entry point for the bot."""
-    # Start the web server for Render health checks
     web_thread = Thread(target=run_web_server)
     web_thread.daemon = True
     web_thread.start()
@@ -393,7 +393,6 @@ def main() -> None:
         
     application = Application.builder().token(token).post_init(post_init).build()
 
-    # Conversation handler to manage different states of user interaction
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
