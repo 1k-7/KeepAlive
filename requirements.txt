@@ -1,4 +1,5 @@
-python-telegram-bot
+TgCrypto
+python-telegram-bot[job-queue]
 pyrogram
 motor
 dnspython
