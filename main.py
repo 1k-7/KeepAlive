@@ -1,5 +1,5 @@
 import logging
-import json
+import re
 import asyncio
 import os
 from threading import Thread
@@ -140,20 +140,17 @@ async def ping_bots_task(context: ContextTypes.DEFAULT_TYPE):
 # --- Bot UI and Handlers ---
 
 async def check_db_connection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Checks if the DB is connected and sends a message if not."""
     if not client:
         reply_target = update.message or update.callback_query.message
         await reply_target.reply_text(
-            "🚨 **Database Error**\nI can't connect to my database. Please check the `DATABASE_URI` and restart.",
+            "🚨 **Database Error**\nI can't connect. Check `DATABASE_URI` and restart.",
             parse_mode="Markdown"
         )
         return False
     return True
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Sends a greeting message and the main menu."""
     if not await check_db_connection(update, context): return ConversationHandler.END
-        
     user = update.effective_user
     await update.message.reply_html(
         rf"👋 Hello, {user.mention_html()}!"
@@ -164,7 +161,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return SELECTING_ACTION
 
 async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Displays the main menu with current status from the database."""
     chat_id = update.effective_chat.id
     data = await load_data(chat_id)
     
@@ -220,25 +216,55 @@ async def save_interval(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         await update.message.reply_text("Invalid input. Please send a positive number.")
     await show_main_menu(update, context); return SELECTING_ACTION
 
+# --- NEW: Bulk-add logic ---
 async def save_bot_username(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Saves one or more bot usernames from a single message."""
     chat_id = update.effective_chat.id
-    bot_username = update.message.text
-    if not bot_username.startswith('@'):
-        await update.message.reply_text("Invalid format. Username must start with '@'."); return AWAIT_BOT_USERNAME
-
-    my_bot_info = await context.bot.get_me()
-    if bot_username == f"@{my_bot_info.username}":
-        await update.message.reply_text("✅ No need to add me! I do that automatically.")
-    else:
-        data = await load_data(chat_id)
-        if bot_username not in data["target_bots"]:
-            data["target_bots"].append(bot_username)
-            await save_data(chat_id, data)
-            await update.message.reply_text(f"✅ `{bot_username}` added.", parse_mode="Markdown")
-        else:
-            await update.message.reply_text(f"⚠️ `{bot_username}` is already in the list.", parse_mode="Markdown")
+    raw_text = update.message.text
     
-    await manage_bots_menu(update, context); return MANAGE_BOTS
+    # Regex to find all valid @usernames
+    potential_bots = re.findall(r"@[a-zA-Z0-9_]{5,32}", raw_text)
+
+    if not potential_bots:
+        await update.message.reply_text("I couldn't find any valid bot usernames (like @my_bot) in your message. Please try again.")
+        return AWAIT_BOT_USERNAME
+
+    data = await load_data(chat_id)
+    my_bot_info = await context.bot.get_me()
+    my_bot_username = f"@{my_bot_info.username}"
+
+    added_bots = []
+    skipped_bots = []
+    
+    # Use a set for efficient checking of existing bots
+    existing_bots = set(data.get("target_bots", []))
+
+    for bot in potential_bots:
+        if bot == my_bot_username:
+            skipped_bots.append(f"`{bot}` (it's me!)")
+        elif bot in existing_bots:
+            skipped_bots.append(f"`{bot}` (already added)")
+        else:
+            existing_bots.add(bot)
+            added_bots.append(f"`{bot}`")
+    
+    # Update data in DB only if there are new additions
+    if added_bots:
+        data["target_bots"] = sorted(list(existing_bots)) # Save as a sorted list
+        await save_data(chat_id, data)
+
+    # Build and send a summary message
+    summary_parts = []
+    if added_bots:
+        summary_parts.append("✅ **Added:**\n" + "\n".join(added_bots))
+    if skipped_bots:
+        summary_parts.append("☑️ **Skipped:**\n" + "\n".join(skipped_bots))
+        
+    await update.message.reply_text("\n\n".join(summary_parts), parse_mode="Markdown")
+    
+    await manage_bots_menu(update, context)
+    return MANAGE_BOTS
+# --- End of bulk-add logic ---
 
 async def remove_bot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query; await query.answer()
@@ -291,7 +317,7 @@ async def post_init(application: Application):
         )
         logger.info(f"Restored pinger job for chat_id {chat_id} with interval {interval}s.")
 
-# --- Prompting and Menu Handlers (no data logic) ---
+# --- Prompting and Menu Handlers ---
 async def prompt_session_string(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query; await query.answer()
     await query.message.reply_text("Please send your Pyrogram session string.\n\nSend /cancel to return.")
@@ -306,7 +332,7 @@ async def manage_bots_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     chat_id = update.effective_chat.id
     if update.callback_query: await update.callback_query.answer()
     data = await load_data(chat_id)
-    keyboard = [[InlineKeyboardButton("➕ Add a New Bot", callback_data="add_bot_prompt")]]
+    keyboard = [[InlineKeyboardButton("➕ Add New Bot(s)", callback_data="add_bot_prompt")]]
     
     for bot_username in data.get("target_bots", []):
         keyboard.append([InlineKeyboardButton(f"➖ Remove {bot_username}", callback_data=f"remove_{bot_username}")])
@@ -322,9 +348,16 @@ async def manage_bots_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await reply_target.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
     return MANAGE_BOTS
 
+# --- NEW: Updated prompt text ---
 async def prompt_add_bot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query; await query.answer()
-    await query.message.reply_text("Please send the bot's username (e.g., `@my_other_bot`).\n\nSend /cancel to go back.")
+    await query.message.reply_text(
+        "Please send one or more bot usernames to add.\n\n"
+        "You can separate them with spaces, commas, or put each on a new line.\n\n"
+        "Example:\n`@my_bot1, @my_bot2 @my_bot3`\n\n"
+        "Send /cancel to go back.",
+        parse_mode="Markdown"
+        )
     return AWAIT_BOT_USERNAME
     
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -332,7 +365,6 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await show_main_menu(update, context); return SELECTING_ACTION
 
 def main() -> None:
-    """Run the bot and the web server."""
     web_thread = Thread(target=run_web_server)
     web_thread.daemon = True
     web_thread.start()
@@ -372,3 +404,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
